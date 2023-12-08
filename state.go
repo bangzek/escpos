@@ -5,23 +5,25 @@ import "fmt"
 type State byte
 
 const (
-	ONLINE State = iota
-	OFFLINE
-	WAIT_RECOVERY
-	FED_BY_BUTTON
-	RECOVERABLE_ERR
-	AUTO_RECOVER_ERR
-	UNRECOVERABLE_ERR
-	AUTOCUTTER_ERR
-	NO_PAPER
-	COVER_IS_OPEN
+	OnlineState State = iota
+	OfflineState
+	WaitRecoveryState
+	FedByButtonState
+	RecoverableErrState
+	AutoRecoverErrState
+	UnrecoverableErrState
+	AutocutterErrState
+	NoPaperState
+	CoverOpenState
 )
 
 func (s State) IsValid() bool {
 	switch s {
-	case ONLINE, OFFLINE, WAIT_RECOVERY, FED_BY_BUTTON,
-		RECOVERABLE_ERR, AUTO_RECOVER_ERR, UNRECOVERABLE_ERR, AUTOCUTTER_ERR,
-		NO_PAPER, COVER_IS_OPEN:
+	case OnlineState, OfflineState,
+		WaitRecoveryState, FedByButtonState,
+		RecoverableErrState, AutoRecoverErrState,
+		UnrecoverableErrState, AutocutterErrState,
+		NoPaperState, CoverOpenState:
 		return true
 	default:
 		return false
@@ -30,26 +32,26 @@ func (s State) IsValid() bool {
 
 func (s State) String() string {
 	switch s {
-	case ONLINE:
+	case OnlineState:
 		return "ONLINE"
-	case OFFLINE:
+	case OfflineState:
 		return "OFFLINE"
-	case WAIT_RECOVERY:
+	case WaitRecoveryState:
 		return "WAIT RECOVERY"
-	case FED_BY_BUTTON:
+	case FedByButtonState:
 		return "FED BY BUTTON"
-	case RECOVERABLE_ERR:
+	case RecoverableErrState:
 		return "RECOVERABLE ERR"
-	case AUTO_RECOVER_ERR:
+	case AutoRecoverErrState:
 		return "AUTO-RECOVER ERR"
-	case UNRECOVERABLE_ERR:
+	case UnrecoverableErrState:
 		return "UNRECOVERABLE ERR"
-	case AUTOCUTTER_ERR:
+	case AutocutterErrState:
 		return "AUTOCUTTER ERR"
-	case NO_PAPER:
+	case NoPaperState:
 		return "NO PAPER"
-	case COVER_IS_OPEN:
-		return "COVER IS OPEN"
+	case CoverOpenState:
+		return "COVER OPEN"
 	default:
 		return fmt.Sprintf("ERR(%d)", byte(s))
 	}
@@ -66,25 +68,25 @@ func (s State) MarshalText() ([]byte, error) {
 func (s *State) UnmarshalText(b []byte) error {
 	switch string(b) {
 	case "ONLINE":
-		*s = ONLINE
+		*s = OnlineState
 	case "OFFLINE":
-		*s = OFFLINE
+		*s = OfflineState
 	case "WAIT RECOVERY":
-		*s = WAIT_RECOVERY
+		*s = WaitRecoveryState
 	case "FED BY BUTTON":
-		*s = FED_BY_BUTTON
+		*s = FedByButtonState
 	case "RECOVERABLE ERR":
-		*s = RECOVERABLE_ERR
+		*s = RecoverableErrState
 	case "AUTO-RECOVER ERR":
-		*s = AUTO_RECOVER_ERR
+		*s = AutoRecoverErrState
 	case "UNRECOVERABLE ERR":
-		*s = UNRECOVERABLE_ERR
+		*s = UnrecoverableErrState
 	case "AUTOCUTTER ERR":
-		*s = AUTOCUTTER_ERR
+		*s = AutocutterErrState
 	case "NO PAPER":
-		*s = NO_PAPER
-	case "COVER IS OPEN":
-		*s = COVER_IS_OPEN
+		*s = NoPaperState
+	case "COVER OPEN":
+		*s = CoverOpenState
 	default:
 		return fmt.Errorf("Invalid State from %q", b)
 	}

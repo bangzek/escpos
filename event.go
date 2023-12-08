@@ -33,7 +33,7 @@ func (e ConnectionEvent) String() string {
 
 type StartPrintEvent struct {
 	Time  time.Time
-	Print []byte
+	Print PrintCmd
 }
 
 func (e StartPrintEvent) eventTag() int {
@@ -48,7 +48,7 @@ func (e StartPrintEvent) String() string {
 
 type FinishPrintEvent struct {
 	Time  time.Time
-	Print []byte
+	Print PrintCmd
 }
 
 func (e FinishPrintEvent) eventTag() int {

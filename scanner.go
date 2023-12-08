@@ -2,40 +2,43 @@ package escpos
 
 import (
 	"errors"
-	"io"
+	"time"
 
-	. "github.com/hanindo/util/v2"
+	"github.com/bangzek/clock"
+)
+
+var (
+	ctime = clock.New()
 )
 
 type Scanner struct {
 	Controller *Controller
 	Config     *ScannerConfig
 
-	data  scannerData
-	cache []Event
-	inErr bool
-	prn   []byte
-	timer *Timer
-	wait  bool
+	data   scannerData
+	ticker *clock.Ticker
 }
 
 type scannerData struct {
+	Cache     []Event
+	Print     PrintCmd
 	Connected bool
-	State     State
+	InErr     bool
 	Drawer    bool
 	FeedBtn   bool
 	NearEnd   bool
+	State     State
 }
+
+var DisconnectErr = errors.New("Printer disconnected")
 
 func (s *Scanner) Scan(cmdCh <-chan []Cmd) <-chan []Event {
 	if s.Config == nil {
 		s.Config = DefaultScannerConfig()
 	}
-	s.data.State = OFFLINE
-	if s.timer == nil {
-		s.timer = ctime.NewTimer(0)
-		<-s.timer.C
-		s.wait = false
+	s.data.State = OfflineState
+	if s.ticker == nil {
+		s.ticker = ctime.NewTicker(s.Config.Interval)
 	}
 
 	evtCh := make(chan []Event, 1)
@@ -50,19 +53,14 @@ func (s *Scanner) run(cmdCh <-chan []Cmd, evtCh chan []Event) {
 	for s.step(cmdCh) {
 		s.flush(evtCh)
 	}
-	if s.data.Connected {
-		s.cache = append(s.cache, ConnectionEvent{ctime.Now(), false})
-		s.data.Connected = false
-	}
+	s.data.setConnected(ctime.Now(), false)
 	s.flush(evtCh)
 }
 
 func (s *Scanner) flush(evtCh chan []Event) {
-	if len(s.cache) > 0 {
-		list := make([]Event, len(s.cache))
-		copy(list, s.cache)
-		evtCh <- list
-		s.cache = s.cache[:0]
+	if len(s.data.Cache) > 0 {
+		evtCh <- append([]Event(nil), s.data.Cache...)
+		s.data.Cache = s.data.Cache[:0]
 	}
 }
 
@@ -83,213 +81,251 @@ func (s *Scanner) connStep(cmdCh <-chan []Cmd) bool {
 		for _, cmd := range list {
 			if s.data.Connected {
 				dis := false
-				rasb := false
 				if pc, ok := cmd.(PrintCmd); ok {
-					b := []byte(pc)
-					dis = NeedDisablePulseLevel(b)
-					s.add(StartPrintEvent{ctime.Now(), b})
-					s.prn = b
-					rasb = true
+					dis = pc.NeedDisablePulseLevel()
+					s.data.startPrint(ctime.Now(), pc)
 				}
 				if dis {
 					if err := s.Controller.DisablePulseLevel(); err != nil {
-						debugLog("ERR %s when disable pulse level", err)
-						if !s.Controller.IsClosed() {
-							s.Controller.Close()
-						}
-						s.data.Connected = false
-						s.add(ConnectionEvent{ctime.Now(), false})
-						debugLog("PURGE %s", cmd)
-						s.add(CmdEvent{
-							ctime.Now(), cmd, CmdRes{DisconnectErr},
-						})
-						s.timer.Reset(s.Config.ErrDelay)
-						s.wait = true
+						now := ctime.Now()
+						s.connErr(true, now, err, "disable pulse level")
+						s.data.purge(now, cmd)
 						continue
 					}
 				}
 				debugLog("EXEC %s", cmd)
 				res := cmd.exec(s.Controller)
 				now := ctime.Now()
-				s.add(CmdEvent{now, cmd, res})
+				s.data.cmdRes(now, cmd, res)
 				if err := res.Error(); err != nil {
-					debugLog("ERR %s when exec %s", err, cmd)
-					if s.Controller.IsClosed() {
-						s.data.Connected = false
-						s.add(ConnectionEvent{now, false})
-						s.timer.Reset(s.Config.ErrDelay)
-						s.wait = true
-					}
+					s.connErr(false, now, err, "exec "+cmd.String())
 				}
 				if s.data.Connected && dis {
 					if err := s.Controller.EnablePulseLevel(); err != nil {
-						debugLog("ERR %s when enable pulse level", err)
-						if s.Controller.IsClosed() {
-							s.data.Connected = false
-							s.add(ConnectionEvent{ctime.Now(), false})
-							s.timer.Reset(s.Config.ErrDelay)
-							s.wait = true
-						}
-					}
-				}
-				if s.data.Connected && rasb {
-					if err := s.Controller.StartASB(ASB_ALL); err != nil {
-						debugLog("ERR %s when start ASB", err)
-						if s.Controller.IsClosed() {
-							s.data.Connected = false
-							s.add(ConnectionEvent{ctime.Now(), false})
-							s.timer.Reset(s.Config.ErrDelay)
-							s.wait = true
-						}
+						s.connErr(false, now, err, "enable pulse level")
 					}
 				}
 			} else {
-				debugLog("PURGE %s", cmd)
-				s.add(CmdEvent{ctime.Now(), cmd, CmdRes{DisconnectErr}})
+				s.data.purge(ctime.Now(), cmd)
 			}
 		}
-	case <-s.timer.C:
-		if err := s.Controller.RestartASB(); err != nil {
-			debugLog("ERR %s when restart ASB", err)
-			if err == io.ErrUnexpectedEOF {
-				s.Controller.Close()
-			}
-			if s.Controller.IsClosed() {
-				s.data.Connected = false
-				s.add(ConnectionEvent{ctime.Now(), false})
-				s.timer.Reset(s.Config.ErrDelay)
-				s.wait = true
-			}
+	case <-s.ticker.C:
+		if ps, err := s.Controller.PrinterStatus(); err != nil {
+			s.connErr(true, ctime.Now(), err, "getting printer status")
 			return true
-		}
-		s.timer.Reset(s.Config.Ping)
-		s.wait = true
-	default:
-		if list, err := s.Controller.GetASBs(); err != nil {
-			debugLog("ERR %s when get ASB", err)
-			if s.Controller.IsClosed() {
-				s.data.Connected = false
-				s.add(ConnectionEvent{ctime.Now(), false})
-				s.timer.Reset(s.Config.ErrDelay)
-				s.wait = true
-			}
 		} else {
-			s.processASBs(list)
+			now := ctime.Now()
+			s.data.finishPrint(now)
+			s.data.setDrawer(now, ps.IsDrawerPin3())
+			s.data.setFeedBtn(now, ps.IsFeedButton())
+			state := OnlineState
+			if ps.IsOffline() {
+				if os, err := s.Controller.OfflineStatus(); err != nil {
+					s.connErr(false, ctime.Now(), err, "getting offline status")
+					return true
+				} else {
+					now = ctime.Now()
+					if os.IsCoverOpen() {
+						state = CoverOpenState
+					} else if os.IsPaperEnd() {
+						state = NoPaperState
+					} else if os.IsError() {
+						if es, err := s.Controller.ErrorStatus(); err != nil {
+							s.connErr(false, ctime.Now(), err,
+								"getting error status")
+							return true
+						} else {
+							now = ctime.Now()
+							if es.IsAutocutter() {
+								state = AutocutterErrState
+							} else if es.IsUnrecoverable() {
+								state = UnrecoverableErrState
+							} else if es.IsAutoRecoverable() {
+								state = AutoRecoverErrState
+							} else if es.IsRecoverable() {
+								state = RecoverableErrState
+							}
+						}
+					} else if os.IsFedByButton() {
+						state = FedByButtonState
+					} else {
+						state = OfflineState
+					}
+				}
+			} else if ps.IsRecovery() {
+				state = WaitRecoveryState
+			}
+			s.data.setState(now, state)
+
+			if rs, err := s.Controller.RollStatus(); err != nil {
+				s.connErr(false, ctime.Now(), err, "getting roll status")
+				return true
+			} else {
+				s.data.setNearEnd(ctime.Now(), rs.IsNearEnd())
+			}
 		}
 	}
 	return true
 }
 
-var DisconnectErr = errors.New("Printer disconnected")
-
 func (s *Scanner) disStep(cmdCh <-chan []Cmd) bool {
-	if s.inErr {
+	if s.data.InErr {
 		select {
 		case list, ok := <-cmdCh:
 			if !ok {
 				return false
 			}
 			now := ctime.Now()
-			res := CmdRes{DisconnectErr}
 			for _, cmd := range list {
-				debugLog("PURGE %s", cmd)
-				s.add(CmdEvent{now, cmd, res})
+				s.data.purge(now, cmd)
 			}
 			return true
-		case <-s.timer.C:
+		case <-s.ticker.C:
 			// just wait
-			s.wait = false
 		}
+	} else {
+		<-s.ticker.C
 	}
+
 	if err := s.Controller.Reset(); err != nil {
-		debugLog("ERR %s when first reset", err)
-		if !s.Controller.IsClosed() {
-			s.Controller.Close()
-		}
-		s.inErr = true
-		s.timer.Reset(s.Config.ErrDelay)
-		s.wait = true
+		s.disErr(err, "first reset")
 		return true
 	}
 
-	now := ctime.Now()
-	if !s.Controller.IsASB() {
-		if err := s.Controller.StartASB(ASB_ALL); err != nil {
-			debugLog("ERR %s when start ASB", err)
-			if !s.Controller.IsClosed() {
-				s.Controller.Close()
-			}
-			s.inErr = true
-			s.timer.Reset(s.Config.ErrDelay)
-			s.wait = true
-			return true
-		}
-	}
-	list, err := s.Controller.GetASBs()
-	if err != nil {
-		debugLog("ERR %s when get ASB", err)
-		if !s.Controller.IsClosed() {
-			s.Controller.Close()
-		}
-		s.inErr = true
-		s.timer.Reset(s.Config.ErrDelay)
-		s.wait = true
+	if ps, err := s.Controller.PrinterStatus(); err != nil {
+		s.disErr(err, "getting printer status")
 		return true
-	}
-	s.data.Connected = true
-	s.add(ConnectionEvent{now, true})
-	s.processASBs(list)
-	if s.Config.Ping > 0 {
-		s.timer.Reset(s.Config.Ping)
-		s.wait = true
+	} else {
+		now := ctime.Now()
+		state := OnlineState
+		if ps.IsOffline() {
+			if os, err := s.Controller.OfflineStatus(); err != nil {
+				s.disErr(err, "getting offline status")
+				return true
+			} else {
+				now = ctime.Now()
+				if os.IsCoverOpen() {
+					state = CoverOpenState
+				} else if os.IsPaperEnd() {
+					state = NoPaperState
+				} else if os.IsError() {
+					if es, err := s.Controller.ErrorStatus(); err != nil {
+						s.disErr(err, "getting error status")
+						return true
+					} else {
+						now = ctime.Now()
+						if es.IsAutocutter() {
+							state = AutocutterErrState
+						} else if es.IsUnrecoverable() {
+							state = UnrecoverableErrState
+						} else if es.IsAutoRecoverable() {
+							state = AutoRecoverErrState
+						} else if es.IsRecoverable() {
+							state = RecoverableErrState
+						}
+					}
+				} else if os.IsFedByButton() {
+					state = FedByButtonState
+				} else {
+					state = OfflineState
+				}
+			}
+		} else if ps.IsRecovery() {
+			state = WaitRecoveryState
+		}
+
+		if rs, err := s.Controller.RollStatus(); err != nil {
+			s.disErr(err, "getting roll status")
+			return true
+		} else {
+			s.data.setConnected(now, true)
+			s.data.finishPrint(now)
+			s.data.setDrawer(now, ps.IsDrawerPin3())
+			s.data.setFeedBtn(now, ps.IsFeedButton())
+			s.data.setState(now, state)
+			s.data.setNearEnd(ctime.Now(), rs.IsNearEnd())
+			if s.data.InErr {
+				s.data.InErr = false
+				s.ticker.Reset(s.Config.Interval)
+			}
+		}
 	}
 	return true
 }
 
-func (s *Scanner) processASBs(list []ASB) {
-	restart := false
-	for _, asb := range list {
-		if s.prn != nil {
-			s.add(FinishPrintEvent{ctime.Now(), s.prn})
-			s.prn = nil
-		}
-
-		if state := asb.AS.State(); s.data.State != state {
-			s.add(StateEvent{asb.Time, state})
-			s.data.State = state
-			if state == UNRECOVERABLE_ERR {
-				restart = true
-			}
-		}
-		if drawer := asb.AS.IsDrawerPin3(); s.data.Drawer != drawer {
-			s.add(DrawerEvent{asb.Time, drawer})
-			s.data.Drawer = drawer
-		}
-		if feedbtn := asb.AS.IsFeedButton(); s.data.FeedBtn != feedbtn {
-			s.add(FeedButtonEvent{asb.Time, feedbtn})
-			s.data.FeedBtn = feedbtn
-		}
-		if nearend := asb.AS.IsPaperNearEnd(); s.data.NearEnd != nearend {
-			s.add(PaperNearEndEvent{asb.Time, nearend})
-			s.data.NearEnd = nearend
-		}
+func (s *Scanner) connErr(close bool, now time.Time, err error, when string) {
+	debugLog("ERR %s when %s", err, when)
+	if close && !s.Controller.IsClosed() {
+		s.Controller.Close()
 	}
-	if restart {
-		if err := s.Controller.RestartASB(); err != nil {
-			debugLog("ERR %s when restart ASB", err)
-			if err == io.ErrUnexpectedEOF {
-				s.Controller.Close()
-			}
-			if s.Controller.IsClosed() {
-				s.data.Connected = false
-				s.add(ConnectionEvent{ctime.Now(), false})
-				s.timer.Reset(s.Config.ErrDelay)
-				s.wait = true
-			}
-		}
+	if s.Controller.IsClosed() {
+		s.data.setConnected(now, false)
 	}
 }
 
-func (s *Scanner) add(evt Event) {
-	s.cache = append(s.cache, evt)
+func (s *Scanner) disErr(err error, when string) {
+	debugLog("ERR %s when %s", err, when)
+	if !s.Controller.IsClosed() {
+		s.Controller.Close()
+	}
+	if !s.data.InErr {
+		s.data.InErr = true
+		s.ticker.Reset(s.Config.ErrDelay)
+	}
+}
+
+func (d *scannerData) setConnected(now time.Time, x bool) {
+	if d.Connected != x {
+		d.Cache = append(d.Cache, ConnectionEvent{now, x})
+		d.Connected = x
+	}
+}
+
+func (d *scannerData) startPrint(now time.Time, cmd PrintCmd) {
+	d.Cache = append(d.Cache, StartPrintEvent{now, cmd})
+	d.Print = cmd
+}
+
+func (d *scannerData) finishPrint(now time.Time) {
+	if d.Print != nil {
+		d.Cache = append(d.Cache, FinishPrintEvent{now, d.Print})
+		d.Print = nil
+	}
+}
+
+func (d *scannerData) purge(now time.Time, cmd Cmd) {
+	debugLog("PURGE %s", cmd)
+	d.Cache = append(d.Cache, CmdEvent{now, cmd, CmdRes{DisconnectErr}})
+}
+
+func (d *scannerData) cmdRes(now time.Time, cmd Cmd, res Res) {
+	d.Cache = append(d.Cache, CmdEvent{now, cmd, res})
+}
+
+func (d *scannerData) setDrawer(now time.Time, x bool) {
+	if d.Drawer != x {
+		d.Cache = append(d.Cache, DrawerEvent{now, x})
+		d.Drawer = x
+	}
+}
+
+func (d *scannerData) setFeedBtn(now time.Time, x bool) {
+	if d.FeedBtn != x {
+		d.Cache = append(d.Cache, FeedButtonEvent{now, x})
+		d.FeedBtn = x
+	}
+}
+
+func (d *scannerData) setState(now time.Time, x State) {
+	if d.State != x {
+		d.Cache = append(d.Cache, StateEvent{now, x})
+		d.State = x
+	}
+}
+
+func (d *scannerData) setNearEnd(now time.Time, x bool) {
+	if d.NearEnd != x {
+		d.Cache = append(d.Cache, PaperNearEndEvent{now, x})
+		d.NearEnd = x
+	}
 }

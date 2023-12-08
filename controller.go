@@ -2,10 +2,7 @@ package escpos
 
 import (
 	"io"
-	"regexp"
 	"time"
-
-	. "github.com/hanindo/util/v2"
 )
 
 const (
@@ -13,20 +10,12 @@ const (
 	CHUNK    = 40
 )
 
-var (
-	ctime = NewClock()
-)
-
 type Controller struct {
 	Dev    Dev
 	Config *ControllerConfig
 
-	dev    io.ReadWriteCloser
-	buff   []byte
-	isASB  bool
-	asbReq ASBReq
-	tASB   time.Time
-	asb    []ASB
+	dev  io.ReadWriteCloser
+	buff []byte
 }
 
 func (c *Controller) Close() {
@@ -34,7 +23,6 @@ func (c *Controller) Close() {
 		log("Closing connection")
 		c.dev.Close()
 		c.dev = nil
-		c.isASB = false
 	}
 }
 
@@ -60,35 +48,17 @@ func (c *Controller) Reset() error {
 	if err := c.Send([]byte{ESC, '@'}); err != nil {
 		return err
 	}
-	if c.isASB {
-		return c.StartASB(c.asbReq)
-	}
 	return nil
-}
-
-const (
-	// DISABLE: GS ( D 5 0 20 1 1 2 1
-	//  ENABLE: GS ( D 5 0 20 1 0 2 0
-
-	DISABLE_PULSE_LEVEL = "\x1D(D\x05\x00\x14\x01\x01\x02\x01"
-	ENABLE_PULSE_LEVEL  = "\x1D(D\x05\x00\x14\x01\x00\x02\x00"
-)
-
-// DLE DC4 0 or 1
-var pulseLvlRe = regexp.MustCompile("\x10\x14[\x00\x01]")
-
-func NeedDisablePulseLevel(b []byte) bool {
-	return pulseLvlRe.Match(b)
 }
 
 // Disable both real-time pulse command (DLE DC4 1 or 2).
 func (c *Controller) DisablePulseLevel() error {
-	return c.Send([]byte(DISABLE_PULSE_LEVEL))
+	return c.Send([]byte{GS, '(', 'D', 5, 0, 20, 1, 1, 2, 1})
 }
 
 // Enable both real-time pulse command (DLE DC4 1 or 2).
 func (c *Controller) EnablePulseLevel() error {
-	return c.Send([]byte(ENABLE_PULSE_LEVEL))
+	return c.Send([]byte{GS, '(', 'D', 5, 0, 20, 1, 0, 2, 0})
 }
 
 // Press Feed Button in real-time.
@@ -218,79 +188,6 @@ func (c *Controller) PulseDrawerPin5Level7() error {
 // From Epson docs it's not possible to pulse both pin at the same time.
 func (c *Controller) PulseDrawerPin5Level8() error {
 	return c.Send([]byte{DLE, DC4, 1, 1, 8})
-}
-
-// Enable Automatic Status Back.
-func (c *Controller) StartASB(req ASBReq) error {
-	if err := c.Send([]byte{GS, 'a', byte(req)}); err != nil {
-		return err
-	}
-
-	if !c.isASB {
-		c.asb = nil
-		if n, err := c.read(0); err != nil {
-			c.Close()
-			return err
-		} else {
-			if s := AS(c.buff[:n]); !s.IsValid() {
-				// disable it
-				c.Send([]byte{GS, 'a', 0})
-				return io.ErrUnexpectedEOF
-			}
-		}
-		c.tASB = ctime.Now()
-		c.isASB = true
-	}
-	c.asbReq = req
-
-	return nil
-}
-
-// Force Automatic Status Back.
-func (c *Controller) RestartASB() error {
-	c.isASB = false
-	return c.StartASB(c.asbReq)
-}
-
-// Disable Automatic Status Back.
-func (c *Controller) StopASB() error {
-	if c.isASB {
-		// Read again to clear the buffer
-		if _, err := c.read(0); err != nil {
-			c.Close()
-			return err
-		}
-
-		if err := c.Send([]byte{GS, 'a', 0}); err != nil {
-			return err
-		}
-		c.isASB = false
-	}
-	return nil
-}
-
-// Is Automatic Status Back Enabled.
-func (c *Controller) IsASB() bool {
-	return c.isASB
-}
-
-// Get current ASB.
-func (c *Controller) GetASBs() ([]ASB, error) {
-	if !c.isASB {
-		if err := c.StartASB(ASB_ALL); err != nil {
-			return nil, err
-		}
-	} else if ctime.Now().Sub(c.tASB) > c.Config.ASBCache {
-		if _, err := c.read(0); err != nil {
-			c.Close()
-			return nil, err
-		}
-	}
-
-	// trim c.asb
-	l := c.asb
-	c.asb = nil
-	return l, nil
 }
 
 // Get real-time printer status.
@@ -502,7 +399,6 @@ func (c *Controller) write(b []byte) error {
 			}
 
 			cont := true
-			var b []byte
 			for cont {
 				switch c.buff[0] {
 				case XON:
@@ -516,31 +412,8 @@ func (c *Controller) write(b []byte) error {
 						return err
 					}
 				default:
-					if c.isASB &&
-						(c.buff[0]&AS_MASK_1 == AS_FIXED_1 || len(b) > 0) {
-						if len(b) == 0 {
-							b = append(b, c.buff[0])
-							debugLog("%d/%d RX: % X", i+1, p, b)
-						} else {
-							b = append(b, c.buff[0])
-							debugLog("%d/%d RX:%d> % X", i+1, p, len(b)-1, b)
-							if len(b) == 4 {
-								if s := AS(b); s.IsValid() {
-									c.tASB = ctime.Now()
-									c.asb = append(c.asb, ASB{c.tASB, s})
-								}
-								b = nil
-								cont = false
-							}
-						}
-						if b != nil {
-							if _, err := c.dev.Read(c.buff[:1]); err != nil {
-								return err
-							}
-						}
-					} else {
-						debugLog("%d/%d ~RX: % X", i+1, p, c.buff[0])
-					}
+					debugLog("%d/%d ~RX: % X", i+1, p, c.buff[0])
+					cont = false
 				}
 			}
 		}
@@ -555,78 +428,36 @@ func (c *Controller) write(b []byte) error {
 }
 
 func (c *Controller) read(l int) (int, error) {
-	rl := l
-	if l == 0 || (l == 1 && c.isASB) {
-		rl += 4
-		//rl += 128
-	}
-	n, err := c.dev.Read(c.buff[:rl])
+	n, err := c.dev.Read(c.buff[:l])
 	if err != nil {
 		return n, err
 	}
 
-	if n == 0 && (l > 0 || !c.isASB) {
+	if n == 0 {
 		timeout := ctime.Now().Add(c.Config.Timeout)
 		for n == 0 && ctime.Now().Before(timeout) {
-			if n, err = c.dev.Read(c.buff[:rl]); err != nil {
+			if n, err = c.dev.Read(c.buff[:l]); err != nil {
 				return n, err
 			}
 		}
 	}
 
-	if n > 0 || l > 0 || !c.isASB {
-		debugLog("RX: % X", c.buff[:n])
-	}
 	if n > 0 {
+		debugLog("RX: % X", c.buff[:n])
 		if c.Dev.UseXonXoff() {
-			t := ctime.Now()
-			for {
-				for tn := trimXonXoff(c.buff[:n]); tn < n; {
-					n = tn
-					if nn, err := c.dev.Read(c.buff[n:rl]); err != nil {
-						return n + nn, err
-					} else if nn > 0 {
-						debugLog("RX:%d> % X", n, c.buff[:n+nn])
-						tn += trimXonXoff(c.buff[n : n+nn])
-						n += nn
-					}
-				}
-				if (l == 0 && n > 0 && n < 4) ||
-					(l == 1 && c.isASB &&
-						((n > 1 && n < 5) ||
-							(n == 1 && c.buff[0]&AS_MASK_1 == AS_FIXED_1))) {
-
-					if nn, err := c.dev.Read(c.buff[n:rl]); err != nil {
-						return n + nn, err
-					} else if nn > 0 {
-						debugLog("RX:%d> % X", n, c.buff[:n+nn])
-						n += nn
-						t = ctime.Now()
-					} else if ctime.Now().Sub(t) >= c.Config.Timeout {
-						break
-					}
-				} else {
-					break
+			for tn := trimXonXoff(c.buff[:n]); tn < n; {
+				n = tn
+				if nn, err := c.dev.Read(c.buff[n:l]); err != nil {
+					return n + nn, err
+				} else if nn > 0 {
+					debugLog("RX:%d> % X", n, c.buff[:n+nn])
+					tn += trimXonXoff(c.buff[n : n+nn])
+					n += nn
 				}
 			}
 		}
 	}
 
-	if n >= 4 && (l == 0 || (l == 1 && c.isASB)) {
-		for i := 0; i <= n-4; i++ {
-			if s := AS(c.buff[i : i+4]); s.IsValid() {
-				c.tASB = ctime.Now()
-				c.asb = append(c.asb, ASB{c.tASB, s})
-				if n > i+4 {
-					copy(c.buff[i:i+4], c.buff[i+4:])
-				}
-				if c.isASB {
-					n -= 4
-				}
-				break
-			}
-		}
-	}
 	return n, nil
 }
 

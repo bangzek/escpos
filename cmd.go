@@ -1,6 +1,9 @@
 package escpos
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 type Cmd interface {
 	exec(*Controller) Res
@@ -19,6 +22,14 @@ func (c PrintCmd) String() string {
 	return fmt.Sprintf("PRINT: %d", len(c))
 }
 
+var (
+	pulseLvlRe = regexp.MustCompile(string([]byte{DLE, DC4, '[', 0, 1, ']'}))
+)
+
+func (c PrintCmd) NeedDisablePulseLevel() bool {
+	return pulseLvlRe.Match(c)
+}
+
 //----------------------------------------------------------------------
 
 type RawCmd []byte
@@ -29,18 +40,6 @@ func (c RawCmd) exec(con *Controller) Res {
 
 func (c RawCmd) String() string {
 	return "RAW: " + string([]byte(c))
-}
-
-//----------------------------------------------------------------------
-
-type RestartASBCmd struct{}
-
-func (c RestartASBCmd) exec(con *Controller) Res {
-	return CmdRes{con.StartASB(ASB_ALL)}
-}
-
-func (c RestartASBCmd) String() string {
-	return "RESTART ASB"
 }
 
 //----------------------------------------------------------------------
