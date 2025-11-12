@@ -30,7 +30,10 @@ type scannerData struct {
 	State     State
 }
 
-var DisconnectErr = errors.New("Printer disconnected")
+var (
+	DisconnectErr         = errors.New("Printer disconnected")
+	PrintingInProgressErr = errors.New("Printing in progress")
+)
 
 func (s *Scanner) Scan(cmdCh <-chan []Cmd) <-chan []Event {
 	if s.Config == nil {
@@ -80,29 +83,37 @@ func (s *Scanner) connStep(cmdCh <-chan []Cmd) bool {
 		}
 		for _, cmd := range list {
 			if s.data.Connected {
-				dis := false
-				if pc, ok := cmd.(PrintCmd); ok {
-					dis = pc.NeedDisablePulseLevel()
-					s.data.startPrint(ctime.Now(), pc)
-				}
-				if dis {
-					if err := s.Controller.DisablePulseLevel(); err != nil {
-						now := ctime.Now()
-						s.connErr(true, now, err, "disable pulse level")
-						s.data.purge(now, cmd)
-						continue
-					}
-				}
-				debugLog("EXEC %s", cmd)
-				res := cmd.exec(s.Controller)
 				now := ctime.Now()
-				s.data.cmdRes(now, cmd, res)
-				if err := res.Error(); err != nil {
-					s.connErr(false, now, err, "exec "+cmd.String())
-				}
-				if s.data.Connected && dis {
-					if err := s.Controller.EnablePulseLevel(); err != nil {
-						s.connErr(false, now, err, "enable pulse level")
+				if s.data.isPrinting() {
+					s.data.busy(now, cmd)
+				} else {
+					dis := false
+					prn := false
+					if pc, ok := cmd.(PrintCmd); ok {
+						dis = pc.NeedDisablePulseLevel()
+						s.data.startPrint(now, pc)
+						prn = true
+					}
+					if dis {
+						err := s.Controller.DisablePulseLevel()
+						now = ctime.Now()
+						if err != nil {
+							s.connErr(true, now, err, "disable pulse level")
+							s.data.purge(now, cmd)
+							continue
+						}
+					}
+					debugLog("EXEC %s", cmd)
+					res := cmd.exec(s.Controller)
+					now = ctime.Now()
+					s.data.cmdRes(now, cmd, res)
+					if err := res.Error(); err != nil {
+						s.connErr(prn, now, err, "exec "+cmd.String())
+					}
+					if s.data.Connected && dis {
+						if err := s.Controller.EnablePulseLevel(); err != nil {
+							s.connErr(true, now, err, "enable pulse level")
+						}
 					}
 				}
 			} else {
@@ -110,32 +121,33 @@ func (s *Scanner) connStep(cmdCh <-chan []Cmd) bool {
 			}
 		}
 	case <-s.ticker.C:
-		if ps, err := s.Controller.PrinterStatus(); err != nil {
-			s.connErr(true, ctime.Now(), err, "getting printer status")
+		ps, err := s.Controller.PrinterStatus()
+		now := ctime.Now()
+		if err != nil {
+			s.connErr(true, now, err, "getting printer status")
 			return true
 		} else {
-			now := ctime.Now()
-			s.data.finishPrint(now)
 			s.data.setDrawer(now, ps.IsDrawerPin3())
 			s.data.setFeedBtn(now, ps.IsFeedButton())
 			state := OnlineState
 			if ps.IsOffline() {
-				if os, err := s.Controller.OfflineStatus(); err != nil {
-					s.connErr(false, ctime.Now(), err, "getting offline status")
+				os, err := s.Controller.OfflineStatus()
+				now = ctime.Now()
+				if err != nil {
+					s.connErr(true, now, err, "getting offline status")
 					return true
 				} else {
-					now = ctime.Now()
 					if os.IsCoverOpen() {
 						state = CoverOpenState
 					} else if os.IsPaperEnd() {
 						state = NoPaperState
 					} else if os.IsError() {
-						if es, err := s.Controller.ErrorStatus(); err != nil {
-							s.connErr(false, ctime.Now(), err,
-								"getting error status")
+						es, err := s.Controller.ErrorStatus()
+						now = ctime.Now()
+						if err != nil {
+							s.connErr(true, now, err, "getting error status")
 							return true
 						} else {
-							now = ctime.Now()
 							if es.IsAutocutter() {
 								state = AutocutterErrState
 							} else if es.IsUnrecoverable() {
@@ -156,12 +168,15 @@ func (s *Scanner) connStep(cmdCh <-chan []Cmd) bool {
 				state = WaitRecoveryState
 			}
 			s.data.setState(now, state)
+			s.data.finishPrint(now)
 
-			if rs, err := s.Controller.RollStatus(); err != nil {
-				s.connErr(false, ctime.Now(), err, "getting roll status")
+			rs, err := s.Controller.RollStatus()
+			now = ctime.Now()
+			if err != nil {
+				s.connErr(true, now, err, "getting roll status")
 				return true
 			} else {
-				s.data.setNearEnd(ctime.Now(), rs.IsNearEnd())
+				s.data.setNearEnd(now, rs.IsNearEnd())
 			}
 		}
 	}
@@ -238,12 +253,13 @@ func (s *Scanner) disStep(cmdCh <-chan []Cmd) bool {
 			s.disErr(err, "getting roll status")
 			return true
 		} else {
+			now = ctime.Now()
 			s.data.setConnected(now, true)
 			s.data.finishPrint(now)
 			s.data.setDrawer(now, ps.IsDrawerPin3())
 			s.data.setFeedBtn(now, ps.IsFeedButton())
 			s.data.setState(now, state)
-			s.data.setNearEnd(ctime.Now(), rs.IsNearEnd())
+			s.data.setNearEnd(now, rs.IsNearEnd())
 			if s.data.InErr {
 				s.data.InErr = false
 				s.ticker.Reset(s.Config.Interval)
@@ -281,6 +297,15 @@ func (d *scannerData) setConnected(now time.Time, x bool) {
 	}
 }
 
+func (d *scannerData) isPrinting() bool {
+	return d.Print != nil
+}
+
+func (d *scannerData) busy(now time.Time, cmd Cmd) {
+	debugLog("BUSY %s", cmd)
+	d.Cache = append(d.Cache, CmdEvent{now, cmd, CmdRes{PrintingInProgressErr}})
+}
+
 func (d *scannerData) startPrint(now time.Time, cmd PrintCmd) {
 	d.Cache = append(d.Cache, StartPrintEvent{now, cmd})
 	d.Print = cmd
@@ -288,7 +313,8 @@ func (d *scannerData) startPrint(now time.Time, cmd PrintCmd) {
 
 func (d *scannerData) finishPrint(now time.Time) {
 	if d.Print != nil {
-		d.Cache = append(d.Cache, FinishPrintEvent{now, d.Print})
+		d.Cache = append(d.Cache,
+			FinishPrintEvent{now, d.Print, d.State <= FedByButtonState})
 		d.Print = nil
 	}
 }

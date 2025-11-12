@@ -41,7 +41,7 @@ func (e StartPrintEvent) eventTag() int {
 }
 
 func (e StartPrintEvent) String() string {
-	return fmt.Sprintf("%s SPRN %d", e.Time.Format(time.TimeOnly), len(e.Print))
+	return fmt.Sprintf("%s SPRN %s", e.Time.Format(time.TimeOnly), e.Print)
 }
 
 //----------------------------------------------------------------------
@@ -49,6 +49,7 @@ func (e StartPrintEvent) String() string {
 type FinishPrintEvent struct {
 	Time  time.Time
 	Print PrintCmd
+	Ok    bool
 }
 
 func (e FinishPrintEvent) eventTag() int {
@@ -56,7 +57,8 @@ func (e FinishPrintEvent) eventTag() int {
 }
 
 func (e FinishPrintEvent) String() string {
-	return fmt.Sprintf("%s FPRN %d", e.Time.Format(time.TimeOnly), len(e.Print))
+	return fmt.Sprintf("%s FPRN %t %s",
+		e.Time.Format(time.TimeOnly), e.Ok, e.Print)
 }
 
 //----------------------------------------------------------------------

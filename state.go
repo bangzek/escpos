@@ -6,9 +6,9 @@ type State byte
 
 const (
 	OnlineState State = iota
-	OfflineState
-	WaitRecoveryState
 	FedByButtonState
+	WaitRecoveryState
+	OfflineState
 	RecoverableErrState
 	AutoRecoverErrState
 	UnrecoverableErrState
@@ -19,8 +19,8 @@ const (
 
 func (s State) IsValid() bool {
 	switch s {
-	case OnlineState, OfflineState,
-		WaitRecoveryState, FedByButtonState,
+	case OnlineState, FedByButtonState, WaitRecoveryState,
+		OfflineState,
 		RecoverableErrState, AutoRecoverErrState,
 		UnrecoverableErrState, AutocutterErrState,
 		NoPaperState, CoverOpenState:
@@ -34,12 +34,12 @@ func (s State) String() string {
 	switch s {
 	case OnlineState:
 		return "ONLINE"
-	case OfflineState:
-		return "OFFLINE"
-	case WaitRecoveryState:
-		return "WAIT RECOVERY"
 	case FedByButtonState:
 		return "FED BY BUTTON"
+	case WaitRecoveryState:
+		return "WAIT RECOVERY"
+	case OfflineState:
+		return "OFFLINE"
 	case RecoverableErrState:
 		return "RECOVERABLE ERR"
 	case AutoRecoverErrState:
@@ -69,12 +69,12 @@ func (s *State) UnmarshalText(b []byte) error {
 	switch string(b) {
 	case "ONLINE":
 		*s = OnlineState
-	case "OFFLINE":
-		*s = OfflineState
-	case "WAIT RECOVERY":
-		*s = WaitRecoveryState
 	case "FED BY BUTTON":
 		*s = FedByButtonState
+	case "WAIT RECOVERY":
+		*s = WaitRecoveryState
+	case "OFFLINE":
+		*s = OfflineState
 	case "RECOVERABLE ERR":
 		*s = RecoverableErrState
 	case "AUTO-RECOVER ERR":

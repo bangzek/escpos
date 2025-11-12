@@ -1,6 +1,7 @@
 package escpos
 
 import (
+	"crypto/md5"
 	"fmt"
 	"regexp"
 )
@@ -19,7 +20,7 @@ func (c PrintCmd) exec(con *Controller) Res {
 }
 
 func (c PrintCmd) String() string {
-	return fmt.Sprintf("PRINT: %d", len(c))
+	return fmt.Sprintf("PRINT: %d %x", len(c), md5.Sum(c))
 }
 
 var (
