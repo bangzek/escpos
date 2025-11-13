@@ -1,0 +1,348 @@
+package main
+
+import (
+	"log"
+	"os"
+	"time"
+
+	"github.com/bangzek/escpos"
+)
+
+const (
+	//SER_DEV = "/dev/ttyS1"
+	SER_DEV = "/dev/ttyUSB0"
+	USB_DEV = "/dev/usb/lp0"
+)
+
+type Deadline interface {
+	SetDeadline(time.Time) error
+}
+
+func main() {
+	log.SetOutput(os.Stdout)
+	escpos.ErrorLogFunc = log.Printf
+	escpos.InfoLogFunc = log.Printf
+	escpos.DebugLogFunc = log.Printf
+
+	/*
+		dev := &escpos.SerialDev{
+			Device: SER_DEV,
+		}
+	*/
+	dev := &escpos.UsbDev{
+		Device: USB_DEV,
+	}
+	con := &escpos.Controller{
+		Dev: dev,
+	}
+
+	if err := con.Reset(); err != nil {
+		log.Fatalf("%s when reset", err)
+	}
+
+	if s, err := con.PrinterStatus(); err != nil {
+		log.Fatalf("%s when get printer status", err)
+	} else {
+		log.Printf("%v", *s)
+	}
+
+	if err := con.StartASB(escpos.ASB_ALL); err != nil {
+		log.Fatalf("%s when start ASB", err)
+	}
+	if l, err := con.GetASBs(); err != nil {
+		log.Fatalf("%s when get ASB", err)
+	} else {
+		for i, a := range l {
+			log.Printf("ASB #%d %s\n", i+1, a)
+		}
+	}
+
+	if err := con.PulseDrawerPin2Level8(); err != nil {
+		log.Fatalf("%s when pulse pin 2", err)
+	}
+
+	if err := con.PulseDrawerPin5Level8(); err != nil {
+		log.Fatalf("%s when pulse pin 5", err)
+	}
+
+	/*
+		b := make([]byte, 10*1024)
+		b[0] = escpos.ESC
+		b[1] = '@'
+		b[2] = escpos.ESC
+		b[3] = 'M'
+		b[4] = 0
+		b[5] = 'T'
+		b[6] = 'E'
+		b[7] = 'S'
+		b[8] = 'T'
+		b[9] = escpos.LF
+		b[len(b)-20] = 'O'
+		b[len(b)-19] = 'K'
+		b[len(b)-18] = escpos.LF
+		b[len(b)-17] = escpos.LF
+		b[len(b)-16] = escpos.ESC
+		b[len(b)-15] = 'i'
+		b[len(b)-14] = escpos.LF
+		b[len(b)-13] = escpos.ESC
+		b[len(b)-12] = 'm'
+		b[len(b)-11] = escpos.LF
+		b[len(b)-10] = escpos.GS
+		b[len(b)-9] = 'V'
+		b[len(b)-8] = 'A'
+		b[len(b)-7] = 1
+		b[len(b)-6] = escpos.LF
+		b[len(b)-5] = escpos.GS
+		b[len(b)-4] = 'V'
+		b[len(b)-3] = 'B'
+		b[len(b)-2] = 1
+		b[len(b)-1] = escpos.LF
+		if err := con.Send(b); err != nil {
+			log.Fatalf("%s when sending", err)
+		}
+	*/
+
+	c := time.After(30 * time.Second)
+loop:
+	for {
+		select {
+		case <-c:
+			break loop
+		default:
+			if l, err := con.GetASBs(); err != nil {
+				log.Fatalf("%s when get ASB", err)
+			} else {
+				for i, a := range l {
+					log.Printf("ASB #%d %s\n", i+1, a)
+				}
+			}
+		}
+	}
+
+	if l, err := con.GetASBs(); err != nil {
+		log.Fatalf("%s when get ASB", err)
+	} else {
+		for i, a := range l {
+			log.Printf("ASB #%d %s\n", i+1, a)
+		}
+	}
+
+	/*
+				if s, err := con.PrinterStatus(); err != nil {
+					log.Fatalf("%s when get printer status", err)
+				} else {
+					log.Printf("%v", *s)
+				}
+
+				if err := con.StopASB(); err != nil {
+					log.Fatalf("%s when stop ASB", err)
+				}
+
+				if s, err := con.PrinterStatus(); err != nil {
+					log.Fatalf("%s when get printer status", err)
+				} else {
+					log.Printf("%v", *s)
+				}
+
+			txt := `
+						'// Initialize printer
+						ESC "@"
+
+						'// Font A
+						ESC "M" 0
+
+		'				' center align
+		'				ESC "a" 1
+		'
+		'				' underline: 2 dots
+		'				ESC "-" 2
+		'
+		'				"#1                        "
+		'
+		'				' print and back up
+		'				ESC "J" 0
+		'				' underline: off
+		'				ESC "-" 0
+		'
+		'				' red
+		'				ESC "r" 1
+		'
+		'				"     10-Juni-2023 10:54:11"
+		'
+		'				LF
+		'				LF
+		'
+		'				' left align
+		'				ESC "a" 0
+		'
+		'				' black
+		'				ESC "r" 0
+		'
+		'				"PUMP"
+		'
+		'				' print and back up
+		'				ESC "J" 0
+		'
+		'				' right align
+		'				ESC "a" 2
+		'
+		'				' red
+		'				ESC "r" 1
+		'
+		'				"1:2" LF
+		'
+		'				' left align
+		'				ESC "a" 0
+		'
+		'				' black
+		'				ESC "r" 0
+
+						ESC "*" 1 16 0
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0xFF 0xFF
+						0xFF 0xFF
+						0xFF 0xFF
+						0xFF 0xFF
+						0xFF 0xFF
+						0xFF 0xFF
+						0xFF 0xFF
+						0xFF 0xFF
+
+						ESC "J" 0
+
+						ESC "*" 1 16 0
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+						0xAA 0x55
+
+						ESC "J" 1
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+						0x00 0x00
+
+						ESC "*" 1 16 0
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+						0x55 0xAA
+
+						LF
+
+						ESC "J" 0
+						' cut paper
+						GS "VB" 0
+						`
+			b, err := escpos.Parse([]byte(txt))
+			if err != nil {
+				log.Fatal(err)
+			}
+			if err := con.Send(b); err != nil {
+				log.Fatal(err)
+			}
+	*/
+}
